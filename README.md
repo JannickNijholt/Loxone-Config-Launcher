@@ -17,8 +17,18 @@ A PowerShell script that automatically detects and launches different versions o
 - **Windows OS** with PowerShell 5.0 or later
 - **Loxone Config** installations in a common directory structure
 - **PowerShell Execution Policy** allowing script execution (handled automatically)
+- 
+## ⚠️ Disclaimer
+
+This is an **unofficial, community-created tool** and is **not affiliated with, endorsed by, or supported by Loxone Electronics GmbH**. This project was created independently to help users manage multiple Loxone Config versions more efficiently.
+
+- **Not an official Loxone product**
+- **Use at your own risk**
+- **No warranty or support from Loxone**
+- **Loxone Config** and **Loxone** are trademarks of Loxone Electronics GmbH
 
 ## 🛠️First-Time
+
 - The script will automatically detect Loxone Config installations
 - You'll be prompted to create a desktop shortcut (optional)
 - Configuration preferences are saved automatically
@@ -59,6 +69,7 @@ Press ENTER to launch the latest version, enter a number (1-6), 'c' to change pa
 ```
 
 ## ⚙️ Configuration
+
 The script automatically creates a configuration file at:
 
 ```
