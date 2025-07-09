@@ -54,7 +54,6 @@ function Write-ConfigFile {
     }
 }
 
-
 # Function to get current script directory
 function Get-ScriptDirectory {
     return Split-Path -Parent $PSCommandPath
@@ -174,40 +173,73 @@ function Ask-CreateShortcut {
     } while ($true)
 }
 
-# Function to get Loxone installation path with notification
+# Function to get Loxone installation path with notification and error handling
 function Get-LoxonePathWithNotification {
     param($config)
-    
+
     $defaultPath = "C:\Program Files (x86)\Loxone"
-    
-    # Use config path if it exists and is valid
-    if ($config.LoxonePath -and (Test-Path $config.LoxonePath)) {
-        Write-Host "Found configuration file - loading path: $($config.LoxonePath)" -ForegroundColor Cyan
-        return $config.LoxonePath
+
+    if ($config.LoxonePath) {
+        Write-Host "Found configuration file - checking path: $($config.LoxonePath)" -ForegroundColor Cyan
+
+        if (Test-Path $config.LoxonePath -PathType Container) {
+            $resolved  = (Resolve-Path $config.LoxonePath).Path
+            $driveRoot = [System.IO.Path]::GetPathRoot($resolved)
+            if ($resolved -eq $driveRoot) {
+                Write-Host "Configured path is a drive root - not allowed." -ForegroundColor Red
+                Write-Host "Invalid path found in configuration. Please specify a new path." -ForegroundColor Yellow
+                return Get-ValidLoxonePath
+            }
+            else {
+                Write-Host "Configuration path is valid." -ForegroundColor Green
+                return $resolved
+            }
+        }
+        else {
+            Write-Host "Configuration path does not exist: $($config.LoxonePath)" -ForegroundColor Red
+            Write-Host "Invalid path found in configuration. Please specify a new path." -ForegroundColor Yellow
+            return Get-ValidLoxonePath
+        }
     }
-    
-    # Use default path if it exists (no notification needed)
+
     if (Test-Path $defaultPath) {
+        Write-Host "Using default path: $defaultPath" -ForegroundColor Green
         return $defaultPath
     }
-    
-    # If neither exists, prompt for path
-    Write-Host "No Loxone installation found at default location: $defaultPath" -ForegroundColor Yellow
-    Write-Host "Please specify the Loxone installation path." -ForegroundColor Yellow
-    
+
+    Write-Host "No valid Loxone installation found." -ForegroundColor Yellow
+    return Get-ValidLoxonePath
+}
+
+# Ask repeatedly until the user enters a *non-root* directory
+function Get-ValidLoxonePath {
     do {
         $newPath = Read-Host "Enter the Loxone installation path"
-        
-        if (Test-Path $newPath) {
-            Write-Host "Path confirmed: $newPath" -ForegroundColor Green
-            return $newPath
-        } else {
-            Write-Host "Path does not exist. Please enter a valid path." -ForegroundColor Red
+
+        # ---------- basic checks ----------
+        if (-not (Test-Path $newPath)) {
+            Write-Host "Path does not exist: $newPath" -ForegroundColor Red
+            continue
         }
+        if (-not ((Get-Item $newPath) -is [System.IO.DirectoryInfo])) {
+            Write-Host "Path exists but is not a directory: $newPath" -ForegroundColor Red
+            continue
+        }
+
+        # ---------- extra rule: not a drive root ----------
+        $resolved     = (Resolve-Path -LiteralPath $newPath).Path           # full, canonical form
+        $driveRoot    = [System.IO.Path]::GetPathRoot($resolved)            # e.g. 'C:\'
+        if ($resolved -eq $driveRoot) {
+            Write-Host "A drive root ($resolved) cannot be used." -ForegroundColor Red
+            continue
+        }
+
+        Write-Host "Path confirmed: $resolved" -ForegroundColor Green
+        return $resolved
     } while ($true)
 }
 
-# Function to change installation path
+# Function to change installation path with enhanced validation
 function Set-LoxonePath {
     param($config)
     
@@ -220,18 +252,44 @@ function Set-LoxonePath {
     Write-Host ""
     
     do {
-        $newPath = Read-Host "Enter the new Loxone installation path"
+        # Use the validation function to get a valid path
+        $newPath = Get-ValidLoxonePath
         
-        if (Test-Path $newPath) {
-            Write-Host "Path confirmed: $newPath" -ForegroundColor Green
-            $config.LoxonePath = $newPath
-            $config.LastUpdated = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-            Write-ConfigFile -config $config
-            return $newPath
-        } else {
-            Write-Host "Path does not exist. Please enter a valid path." -ForegroundColor Red
+        # Check for Loxone Config folders in the new path
+        try {
+            $loxoneFolders = Get-ChildItem -Path $newPath -Directory -ErrorAction Stop | 
+                            Where-Object { $_.Name -like "*config*" -or $_.Name -like "*loxone*" }
         }
+        catch {
+            Write-Host "Error scanning directory: $($_.Exception.Message)" -ForegroundColor Red
+            continue
+        }
+        
+        if ($loxoneFolders.Count -eq 0) {
+            Write-Host ""
+            Write-Host "No Loxone Config versions were found in `"$newPath`"." -ForegroundColor Yellow
+            Write-Host "If this directory really is the correct installation folder, type Y to save it anyway." -ForegroundColor Yellow
+            Write-Host "Otherwise press Enter and specify another path." -ForegroundColor Yellow
+            
+            $confirmSave = Read-Host "Save this path? (y/N)"
+            
+            if ($confirmSave -notmatch '^[yY]$') {
+                Write-Host "Path not saved. Please enter a new path." -ForegroundColor Cyan
+                continue
+            }
+        }
+        
+        # If we reach here, either Loxone folders were found OR user confirmed to save anyway
+        break
+        
     } while ($true)
+    
+    # Save the new path
+    Write-Host "Path saved: $newPath" -ForegroundColor Green
+    $config.LoxonePath = $newPath
+    $config.LastUpdated = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Write-ConfigFile -config $config
+    return $newPath
 }
 
 # Function to extract version from unins000.dat file
@@ -311,7 +369,7 @@ function Find-LoxoneExecutable {
     return $null
 }
 
-# Main script execution
+# Main script execution with error handling
 Clear-Host
 Write-Host "=== Loxone Config Version Launcher ===" -ForegroundColor Cyan
 Write-Host ""
@@ -329,13 +387,58 @@ if ($isFirstRun) {
     }
 }
 
-# Get the Loxone installation path
-$basePath = Get-LoxonePathWithNotification -config $config
+# Get the Loxone installation path with error handling
+$basePath = $null
+$pathSuccess = $false
 
-# Update config with the path if it was determined
-if (-not $config.LoxonePath) {
-    $config.LoxonePath = $basePath
+try {
+    $basePath = Get-LoxonePathWithNotification -config $config
+    $pathSuccess = $true
+    
+    # Update config with the path if it was determined or corrected
+    if ($basePath -ne $config.LoxonePath) {
+        $config.LoxonePath = $basePath
+        Write-ConfigFile -config $config
+    }
 }
+catch {
+    Write-Host "Error determining Loxone installation path: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "This usually indicates a problem with the configured path." -ForegroundColor Yellow
+}
+
+if (-not $pathSuccess) {
+    Write-Host ""
+    Write-Host "Would you like to:" -ForegroundColor Cyan
+    Write-Host "1. Manually set a new installation path" -ForegroundColor White
+    Write-Host "2. Exit the script" -ForegroundColor White
+    Write-Host ""
+    
+    do {
+        $choice = Read-Host "Enter your choice (1-2)"
+        
+        if ($choice -eq '1') {
+            try {
+                $basePath = Get-ValidLoxonePath
+                $config.LoxonePath = $basePath
+                Write-ConfigFile -config $config
+                Write-Host "Path set successfully: $basePath" -ForegroundColor Green
+                break
+            }
+            catch {
+                Write-Host "Error setting path: $($_.Exception.Message)" -ForegroundColor Red
+                continue
+            }
+        }
+        elseif ($choice -eq '2') {
+            Write-Host "Exiting..." -ForegroundColor Yellow
+            exit 0
+        }
+        else {
+            Write-Host "Invalid choice. Please enter 1 or 2." -ForegroundColor Red
+        }
+    } while ($true)
+}
+
 
 # Ask about desktop shortcut on first run
 if ($isFirstRun -and $config.CreateDesktopShortcut -eq $null) {
@@ -352,17 +455,56 @@ if ($isFirstRun -and $config.CreateDesktopShortcut -eq $null) {
     Write-ConfigFile -config $config
 }
 
-
-# Get all Loxone Config folders
+# Get all Loxone Config folders with error handling
 Write-Host ""
 Write-Host "Scanning for Loxone Config installations..." -ForegroundColor Yellow
 
-$loxoneFolders = Get-ChildItem -Path $basePath -Directory | 
-                 Where-Object { $_.Name -like "*config*" -or $_.Name -like "*loxone*" }
+$loxoneFolders = @()
+$scanSuccess = $false
 
-if ($loxoneFolders.Count -eq 0) {
-    Write-Host "No Loxone Config folders found in $basePath" -ForegroundColor Red
-    exit 1
+try {
+    $loxoneFolders = Get-ChildItem -Path $basePath -Directory -ErrorAction Stop | 
+                     Where-Object { $_.Name -like "*config*" -or $_.Name -like "*loxone*" }
+    $scanSuccess = $true
+}
+catch {
+    Write-Host "Error scanning directory '$basePath': $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "This usually means the path is invalid or inaccessible." -ForegroundColor Yellow
+}
+
+if (-not $scanSuccess -or $loxoneFolders.Count -eq 0) {
+    if ($scanSuccess) {
+        Write-Host "No Loxone Config folders found in $basePath" -ForegroundColor Red
+    }
+    
+    Write-Host ""
+    Write-Host "Would you like to:" -ForegroundColor Cyan
+    Write-Host "1. Change the installation path" -ForegroundColor White
+    Write-Host "2. Exit the script" -ForegroundColor White
+    Write-Host ""
+    
+    do {
+        $choice = Read-Host "Enter your choice (1-2)"
+        
+        if ($choice -eq '1') {
+            $newPath = Set-LoxonePath -config $config
+            if ($newPath -ne $config.LoxonePath) {
+                Write-Host ""
+                Write-Host "Path updated. Please restart the script to use the new path." -ForegroundColor Green
+            }
+            Write-Host ""
+            Write-Host "Press any key to exit..."
+            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            exit 0
+        }
+        elseif ($choice -eq '2') {
+            Write-Host "Exiting..." -ForegroundColor Yellow
+            exit 0
+        }
+        else {
+            Write-Host "Invalid choice. Please enter 1 or 2." -ForegroundColor Red
+        }
+    } while ($true)
 }
 
 # Build list of available versions
@@ -387,8 +529,37 @@ foreach ($folder in $loxoneFolders) {
 # Check if any valid installations were found
 if ($versionList.Count -eq 0) {
     Write-Host "No valid Loxone Config installations found with executables." -ForegroundColor Red
-    exit 1
+    Write-Host "This means no Loxone Config .exe files were found in the scanned folders." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Would you like to:" -ForegroundColor Cyan
+    Write-Host "1. Change the installation path" -ForegroundColor White
+    Write-Host "2. Exit the script" -ForegroundColor White
+    Write-Host ""
+    
+    do {
+        $choice = Read-Host "Enter your choice (1-2)"
+        
+        if ($choice -eq '1') {
+            $newPath = Set-LoxonePath -config $config
+            if ($newPath -ne $config.LoxonePath) {
+                Write-Host ""
+                Write-Host "Path updated. Please restart the script to use the new path." -ForegroundColor Green
+            }
+            Write-Host ""
+            Write-Host "Press any key to exit..."
+            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            exit 0
+        }
+        elseif ($choice -eq '2') {
+            Write-Host "Exiting..." -ForegroundColor Yellow
+            exit 0
+        }
+        else {
+            Write-Host "Invalid choice. Please enter 1 or 2." -ForegroundColor Red
+        }
+    } while ($true)
 }
+
 
 # Sort by version in descending order (newest first)
 $versionList = $versionList | Sort-Object VersionObject -Descending
@@ -484,8 +655,6 @@ do {
         Write-Host "Press ENTER to launch the latest version, enter a number (1-$($versionList.Count)), 'c' to change path/create shortcut, or 'q' to quit:" -ForegroundColor Cyan
         continue
     }
-
-
     
     # Quit
     if ($selection -eq 'q' -or $selection -eq 'Q') {
@@ -512,14 +681,20 @@ Write-Host ""
 Write-Host "Launching Loxone Config $($selectedVersion.Version)..." -ForegroundColor Green
 
 try {
-    Start-Process -FilePath $selectedVersion.Executable -WorkingDirectory $selectedVersion.Path
+    Start-Process -FilePath $selectedVersion.Executable -WorkingDirectory $selectedVersion.Path -ErrorAction Stop
     Write-Host "Successfully launched Loxone Config!" -ForegroundColor Green
+    
+    # Brief pause to allow the process to start
+    Start-Sleep -Milliseconds 500
+    
+    # Exit automatically after successful launch
+    Write-Host "Exiting launcher..." -ForegroundColor Cyan
+    exit 0
 }
 catch {
     Write-Host "Error launching Loxone Config: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "Executable path: $($selectedVersion.Executable)" -ForegroundColor Yellow
+    
+    # Throw an error to indicate failure
+    throw "Failed to launch Loxone Config: $($_.Exception.Message)"
 }
-
-Write-Host ""
-Write-Host "Press any key to exit..."
-$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
